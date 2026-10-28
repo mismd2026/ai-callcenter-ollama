@@ -1,0 +1,6 @@
+apiVersion: v2
+name: callcenter
+description: Self-hosted AI call center (API + Ollama + VOICEVOX)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "cc.name" . }}-ollama
+  labels: {{- include "cc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ollama
+spec:
+  serviceName: {{ include "cc.name" . }}-ollama
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: ollama }
+  template:
+    metadata:
+      labels: {{- include "cc.labels" . | nindent 8 }}
+        app.kubernetes.io/component: ollama
+    spec:
+      containers:
+        - name: ollama
+          image: {{ .Values.ollama.image }}
+          ports: [{ containerPort: 11434, name: http }]
+          # Pre-pull the model so the first call is not a cold start
+          lifecycle:
+            postStart:
+              exec: { command: ["sh", "-c", "sleep 5 && ollama pull {{ .Values.ollama.model }}"] }
+          resources:
+            limits: { nvidia.com/gpu: {{ .Values.ollama.gpu }} }
+          volumeMounts: [{ name: models, mountPath: /root/.ollama }]
+  volumeClaimTemplates:
+    - metadata: { name: models }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: {{ .Values.ollama.storage }} } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cc.name" . }}-ollama
+spec:
+  selector: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: ollama }
+  ports: [{ port: 11434, targetPort: http }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cc.name" . }}-voicevox
+  labels: {{- include "cc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: voicevox
+spec:
+  replicas: {{ .Values.voicevox.replicas }}
+  selector:
+    matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: voicevox }
+  template:
+    metadata:
+      labels: {{- include "cc.labels" . | nindent 8 }}
+        app.kubernetes.io/component: voicevox
+    spec:
+      containers:
+        - name: voicevox
+          image: {{ .Values.voicevox.image }}
+          ports: [{ containerPort: 50021, name: http }]
+          readinessProbe: { httpGet: { path: /version, port: http } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cc.name" . }}-voicevox
+spec:
+  selector: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: voicevox }
+  ports: [{ port: 50021, targetPort: http }]

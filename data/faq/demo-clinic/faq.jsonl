@@ -1,0 +1,6 @@
+{"id": "hours-01", "category": "access", "question": "診療時間を教えてください", "answer": "診療時間は平日9時から18時、土曜日は9時から13時です。日曜・祝日は休診です。"}
+{"id": "access-01", "category": "access", "question": "駐車場はありますか", "answer": "建物の裏手に5台分の無料駐車場がございます。満車の際は近隣のコインパーキングをご利用ください。"}
+{"id": "reserve-01", "category": "reservation", "question": "予約の変更はできますか", "answer": "予約の変更は前日の17時まで、お電話またはWeb予約ページから承っております。"}
+{"id": "reserve-02", "category": "reservation", "question": "当日予約はできますか", "answer": "当日の空き枠がある場合はご予約いただけます。空き状況はWeb予約ページでご確認いただけます。"}
+{"id": "pay-01", "category": "payment", "question": "クレジットカードは使えますか", "answer": "クレジットカードと交通系電子マネーがご利用いただけます。"}
+{"id": "doc-01", "category": "documents", "question": "診断書の発行にはどれくらいかかりますか", "answer": "診断書は通常1週間程度でお渡ししております。発行手数料は書類の種類により異なります。"}

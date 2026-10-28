@@ -1,0 +1,31 @@
+image:
+  repository: ghcr.io/mismd2026/ai-callcenter-ollama
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+api:
+  replicas: 2
+  resources:
+    requests: { cpu: "1", memory: 4Gi }
+    limits: { memory: 8Gi }
+  whisperModel: medium
+  whisperDevice: cuda
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 70
+
+ollama:
+  image: ollama/ollama:latest
+  model: qwen2.5:7b-instruct
+  gpu: 1
+  storage: 50Gi
+
+voicevox:
+  image: voicevox/voicevox_engine:nvidia-latest
+  replicas: 2
+
+# Policy: no AI traffic may leave the cluster.
+networkPolicy:
+  enabled: true
