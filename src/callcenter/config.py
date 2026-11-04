@@ -38,6 +38,8 @@ class Settings:
     max_ai_turns_without_resolution: int = field(
         default_factory=lambda: int(_env("MAX_AI_TURNS", "3"))
     )
+    # Past turns given to the LLM / used for follow-up retrieval (0 disables).
+    max_history_turns: int = field(default_factory=lambda: int(_env("MAX_HISTORY_TURNS", "3")))
     # Guard rail: refuse to start if an endpoint points outside the private network.
     allow_external_endpoints: bool = field(
         default_factory=lambda: _env("ALLOW_EXTERNAL_ENDPOINTS", "false").lower() == "true"

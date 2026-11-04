@@ -29,6 +29,7 @@ def build_app():
         direct_threshold=s.faq_direct_threshold,
         context_threshold=s.rag_context_threshold,
         max_ai_turns=s.max_ai_turns_without_resolution,
+        max_history_turns=s.max_history_turns,
     )
     # data/faq/<tenant-id>/tenant.json + *.jsonl
     for tenant_dir in sorted(p for p in Path(s.faq_dir).iterdir() if p.is_dir()):
