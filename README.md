@@ -119,6 +119,7 @@ ruff check .
 
 ```python
 from callcenter.cost_model import Workload, estimate
+
 estimate(Workload(peak_calls_per_hour=120, ai_resolution_rate=0.6))
 # Estimate(gpus=2, operators=8, monthly_cost_jpy=3040000, monthly_calls=17640, cost_per_call_jpy=172.3)
 ```
