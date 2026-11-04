@@ -69,6 +69,8 @@ class ConversationState:
     recent_queries: list[str] = field(default_factory=list)
     # (caller utterance, AI reply) pairs, oldest first. Kept in memory only.
     history: list[tuple[str, str]] = field(default_factory=list)
+    # FAQ ids the AI has answered from during this call (for the operator brief).
+    cited_sources: list[str] = field(default_factory=list)
 
     @property
     def previous_utterance(self) -> str | None:
@@ -91,6 +93,7 @@ class EscalationPolicy:
         text = utterance.strip()
         decision = self._decide(text, state)
         state.history.append((text, decision.reply))
+        state.cited_sources.extend(decision.sources)
         if self.max_history_turns >= 0:
             del state.history[: max(0, len(state.history) - self.max_history_turns)]
         return decision
