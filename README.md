@@ -15,6 +15,7 @@
 | 🔒 データ主権 | AIエンドポイントが外部を向いていると**起動を拒否**。K8s NetworkPolicyでモデルサーバーの外向き通信を遮断 | `config.py` / `networkpolicy.yaml` |
 | 🧭 3層エスカレーション | ① FAQ原文読み上げ → ② FAQ根拠付きLLM回答 → ③ 有人対応。「人と話したい」「解約」等は即座に有人へ | `escalation.py` |
 | 💬 続きの質問 | 直前の発話と合わせてFAQを検索し、直近の会話をLLMに渡すので「それは無料ですか」にも答えられる。前の話題のFAQを原文で読み上げることはしない | `escalation.py` |
+| 📝 引き継ぎ要約 | 有人へ回すとき、用件の要約・エスカレーション理由・会話記録をオペレーター向けにまとめる。応答を返した後に生成するので発信者を待たせず、LLM失敗時も定型の要約で引き継ぐ。長い数字（カード番号等）は自動で伏せる | `handoff.py` / `GET .../handoff` |
 | 📚 RAG FAQ | multilingual-e5（`query:` / `passage:` プレフィックス対応）でテナントごとに独立した索引 | `rag.py` |
 | 🏢 マルチテナント | テナント単位の索引・セッション分離＋PostgreSQL RLSで他社データ参照を構造的に防止 | `tenants.py` / `db/schema.sql` |
 | ⏱️ レイテンシ計測 | STT / 判定 / TTS の段階別ミリ秒をターンごとに記録、Prometheus形式で出力 | `pipeline.py` / `/metrics` |
@@ -90,6 +91,28 @@ curl -s -X POST localhost:8000/v1/tenants/demo-clinic/calls/$CALL/audio \
 }
 ```
 
+### オペレーターへの引き継ぎ要約
+
+有人対応（layer 3）になったターンの応答には `handoff_url` が入ります（音声ターンでは `X-Handoff-Url` ヘッダー）。オペレーター画面はこのURLを取得します。
+
+```bash
+curl -s localhost:8000/v1/tenants/demo-clinic/calls/$CALL/handoff | jq
+```
+
+```json
+{
+  "status": "ready",
+  "summary": "駐車場の有無を確認したうえで、解約を希望されています。",
+  "reason": "hard rule matched: 解約",
+  "last_utterance": "解約したいです",
+  "transcript": [{"role": "caller", "text": "駐車場はありますか"}, {"role": "ai", "text": "建物の裏手に…"}],
+  "faq_sources": ["access-01"],
+  "generated_by": "llm"
+}
+```
+
+要約の生成中は `{"status": "pending"}` が返ります。
+
 ### Kubernetes へのデプロイ
 
 ```bash
@@ -106,7 +129,7 @@ GPUやモデルなしで、通話フロー全体を数百ミリ秒で検証で�
 
 ```bash
 pip install -e ".[dev]"
-pytest -q        # 35 tests
+pytest -q        # 42 tests
 ruff check .
 ```
 
@@ -114,6 +137,7 @@ ruff check .
 |---|---|
 | `test_escalation.py` | 各層への振り分け、強制ルールの優先、LLMの回答拒否、繰り返し・ターン上限での有人化、続きの質問・履歴の上限・通話間で履歴が混ざらないこと |
 | `test_api.py` | テキスト/音声ターン、**テナント間でセッション・FAQが漏れないこと**、入力検証、メトリクス |
+| `test_handoff.py` | 引き継ぎ要約の内容、LLM失敗時の代替要約、番号の伏せ字、テナント間で要約が見えないこと |
 | `test_rag.py` | e5プレフィックス付与、類似度順の検索 |
 | `test_cost_model_and_config.py` | Erlang Cの既知値、AI解決率とコストの関係、外部エンドポイント検出 |
 
@@ -135,6 +159,7 @@ src/callcenter/
   adapters.py     STT / LLM / TTS クライアント（Protocolで差し替え可能）
   rag.py          FAQ読み込みとベクトル検索
   escalation.py   3層エスカレーション判定
+  handoff.py      オペレーター向け引き継ぎ要約
   pipeline.py     音声1ターンの処理とレイテンシ計測
   tenants.py      テナント管理
   api.py          FastAPI エンドポイント
@@ -148,7 +173,7 @@ data/faq/         テナント別FAQ（サンプル: demo-clinic）
 ## 今後の拡張
 
 - ストリーミングSTT／TTSによる応答開始までの遅延短縮（目標 < 1.5秒）
-- オペレーター引き継ぎ時に会話要約を画面へ表示
+- 引き継ぎ要約を表示するオペレーター画面（APIは実装済み）
 - FAQ未回答ログからの改善候補の自動抽出
 
 ## License
