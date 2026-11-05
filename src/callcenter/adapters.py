@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import io
 import json
+import wave
 from dataclasses import dataclass
 from typing import Protocol
 
 import httpx
+import numpy as np
 
 # --------------------------------------------------------------------------- protocols
 
@@ -31,6 +33,41 @@ class TextToSpeech(Protocol):
 
 # --------------------------------------------------------------------------- STT
 
+WHISPER_SAMPLE_RATE = 16000
+
+
+class TranscriptionError(RuntimeError):
+    """Speech recognition failed (undecodable audio or an engine error)."""
+
+
+def decode_wav(audio: bytes, target_rate: int = WHISPER_SAMPLE_RATE) -> np.ndarray | None:
+    """Decode PCM WAV into mono float32 at `target_rate`, without ffmpeg/PyAV.
+
+    Telephony gateways and VOICEVOX both send PCM WAV, so decoding it here keeps
+    speech recognition independent of the PyAV version faster-whisper happens to
+    be installed with. Returns None for anything that is not PCM WAV.
+    """
+    try:
+        with wave.open(io.BytesIO(audio)) as w:
+            channels, width, rate = w.getnchannels(), w.getsampwidth(), w.getframerate()
+            frames = w.readframes(w.getnframes())
+    except (wave.Error, EOFError):
+        return None
+    if width == 1:  # 8-bit PCM is unsigned
+        pcm = (np.frombuffer(frames, np.uint8).astype(np.float32) - 128) / 128
+    elif width == 2:
+        pcm = np.frombuffer(frames, "<i2").astype(np.float32) / 32768
+    elif width == 4:
+        pcm = np.frombuffer(frames, "<i4").astype(np.float32) / 2147483648
+    else:
+        return None
+    if channels > 1:
+        pcm = pcm.reshape(-1, channels).mean(axis=1)
+    if rate != target_rate and len(pcm):
+        n = max(1, round(len(pcm) * target_rate / rate))
+        pcm = np.interp(np.linspace(0, len(pcm) - 1, n), np.arange(len(pcm)), pcm)
+    return pcm.astype(np.float32)
+
 
 class WhisperSTT:
     """faster-whisper (CTranslate2) running on the same node as the API pod."""
@@ -42,13 +79,19 @@ class WhisperSTT:
         self._model = WhisperModel(model_size, device=device, compute_type=compute_type)
 
     def transcribe(self, audio: bytes, language: str = "ja") -> str:
-        segments, _info = self._model.transcribe(
-            io.BytesIO(audio),
-            language=language,
-            vad_filter=True,  # drop silence -> lower latency and fewer hallucinations
-            beam_size=1,
-        )
-        return "".join(seg.text for seg in segments).strip()
+        pcm = decode_wav(audio)
+        # PCM WAV is decoded here; other formats fall back to faster-whisper's own decoder.
+        source = pcm if pcm is not None else io.BytesIO(audio)
+        try:
+            segments, _info = self._model.transcribe(
+                source,
+                language=language,
+                vad_filter=True,  # drop silence -> lower latency and fewer hallucinations
+                beam_size=1,
+            )
+            return "".join(seg.text for seg in segments).strip()
+        except Exception as e:  # surface as a handled error, not a 500
+            raise TranscriptionError(f"{type(e).__name__}: {e}") from e
 
 
 # --------------------------------------------------------------------------- LLM

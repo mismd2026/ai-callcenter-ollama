@@ -40,7 +40,7 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Resp
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
-from .adapters import SpeechToText, TextToSpeech
+from .adapters import SpeechToText, TextToSpeech, TranscriptionError
 from .deployment import DeploymentManifest, RecordingStore, issue_bundle
 from .escalation import ConversationState, Layer
 from .handoff import HandoffSummarizer, HandoffSummary, mask_numbers
@@ -319,7 +319,11 @@ def create_app(
         audio = await file.read()
         if not audio:
             raise HTTPException(400, "empty audio")
-        result = VoicePipeline(stt, tenant.policy, tts).handle_audio(audio, state)
+        try:
+            result = VoicePipeline(stt, tenant.policy, tts).handle_audio(audio, state)
+        except TranscriptionError as e:
+            # The caller's turn is not consumed; the gateway can ask them to repeat.
+            raise HTTPException(422, f"speech recognition failed: {e}") from e
         _record(tenant, call_id, result)
         headers = {
             "X-Escalation-Layer": str(int(result.decision.layer)),

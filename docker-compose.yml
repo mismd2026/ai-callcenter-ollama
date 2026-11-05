@@ -7,12 +7,19 @@ services:
     ports: ["8000:8000"]
     environment:
       OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b-instruct}
       VOICEVOX_URL: http://voicevox:50021
       WHISPER_MODEL: small        # use medium/large-v3 on GPU nodes
       WHISPER_DEVICE: cpu
+      # Recorder bundles (#5): address the customer's recorder connects to,
+      # and the sha256 of the admin token (admin API is off when empty).
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8000}
+      ADMIN_TOKEN_SHA256: ${ADMIN_TOKEN_SHA256:-}
+      STATE_DIR: /app/state
     depends_on: [ollama, voicevox, db]
     volumes:
       - hf-cache:/home/app/.cache/huggingface
+      - state:/app/state
 
   ollama:
     image: ollama/ollama:latest
@@ -39,3 +46,4 @@ volumes:
   ollama: {}
   pg: {}
   hf-cache: {}
+  state: {}
