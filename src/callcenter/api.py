@@ -6,10 +6,14 @@
     DELETE /v1/tenants/{tenant}/calls/{call_id}          end the call, discard its conversation
     GET  /v1/tenants/{tenant}/calls/{call_id}/handoff    operator brief after escalation
     DELETE /v1/tenants/{tenant}/calls/{call_id}/handoff  operator acknowledged, discard brief
+    GET  /v1/tenants/{tenant}/records                    recorder app pulls finished calls
+    POST /v1/tenants/{tenant}/records/{record_id}/ack    recorder stored it -> delete here
 
 Conversation data is personal data and lives in memory only. It is discarded
 when the call ends, when a call is idle longer than `call_idle_timeout_s`, and
 operator briefs after they are acknowledged or `handoff_ttl_s` has passed.
+Tenants that enable recording get a record of each finished call queued for
+their own recorder app (see records.py); it is deleted once acknowledged.
     GET  /healthz                                        liveness
     GET  /metrics                                        Prometheus text format
 
@@ -24,16 +28,18 @@ import time
 import uuid
 from collections import Counter
 from collections.abc import Callable
+from datetime import UTC, datetime
 from urllib.parse import quote
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Response, UploadFile
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Response, UploadFile
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from .adapters import SpeechToText, TextToSpeech
 from .escalation import ConversationState, Layer
-from .handoff import HandoffSummarizer, HandoffSummary
+from .handoff import HandoffSummarizer, HandoffSummary, mask_numbers
 from .pipeline import TurnResult, VoicePipeline
+from .records import Outbox
 from .tenants import Tenant, TenantRegistry
 
 
@@ -79,6 +85,8 @@ def create_app(
     call_idle_timeout_s: float = 600.0,
     handoff_ttl_s: float = 1800.0,
     clock: Callable[[], float] = time.monotonic,
+    outbox: Outbox | None = None,
+    wall_clock: Callable[[], float] = time.time,
 ) -> FastAPI:
     app = FastAPI(title="AI Call Center", version="0.1.0")
     metrics: Counter[str] = Counter()
@@ -88,6 +96,13 @@ def create_app(
     # "tenant/call_id" -> last activity time, for idle-call expiry.
     last_seen: dict[str, float] = {}
     last_layer: dict[str, int] = {}
+    # Per-turn log kept only for tenants that collect records.
+    turn_logs: dict[str, list[dict]] = {}
+    started_at: dict[str, str] = {}
+    outbox = outbox if outbox is not None else Outbox(clock=clock)
+
+    def _iso() -> str:
+        return datetime.fromtimestamp(wall_clock(), UTC).isoformat(timespec="seconds")
 
     def _key(tenant_id: str, call_id: str) -> str:
         return f"{tenant_id}/{call_id}"
@@ -95,12 +110,39 @@ def create_app(
     def _drop_call(key: str, why: str) -> ConversationState | None:
         tenant_id, call_id = key.split("/", 1)
         last_seen.pop(key, None)
-        last_layer.pop(key, None)
+        layer = last_layer.pop(key, None)
+        turns = turn_logs.pop(key, [])
+        started = started_at.pop(key, None)
         tenant = registry.get(tenant_id)
         state = tenant.sessions.pop(call_id, None) if tenant else None
         if state is not None:
             metrics[f'callcenter_calls_closed_total{{tenant="{tenant_id}",why="{why}"}}'] += 1
+            if tenant.recording.enabled:
+                outbox.put(tenant_id, _build_record(key, call_id, started, why, layer, turns))
         return state
+
+    def _build_record(
+        key: str, call_id: str, started: str | None, why: str, layer: int | None, turns: list
+    ) -> dict:
+        brief = handoffs.get(key)
+        return {
+            "schema": "callcenter.call_record/v1",
+            "record_id": call_id,
+            "call_id": call_id,
+            "started_at": started,
+            "ended_at": _iso(),
+            "end_reason": why,  # "ended" | "idle"
+            "final_layer": layer,
+            "turns": turns,
+            "handoff": None
+            if brief is None
+            else {
+                "summary": brief.summary,
+                "reason": brief.reason,
+                "faq_sources": brief.faq_sources,
+                "generated_by": brief.generated_by,
+            },
+        }
 
     def _drop_handoff(key: str) -> None:
         handoffs.pop(key, None)
@@ -115,6 +157,7 @@ def create_app(
             _drop_call(key, "idle")
         for key in [k for k, t in handoff_created.items() if now - t > handoff_ttl_s]:
             _drop_handoff(key)
+        outbox.sweep()
         return await call_next(request)
 
     def _tenant(tenant_id: str) -> Tenant:
@@ -132,7 +175,21 @@ def create_app(
 
     def _record(tenant: Tenant, call_id: str, result: TurnResult) -> None:
         layer = int(result.decision.layer)
-        last_layer[_key(tenant.id, call_id)] = layer
+        key = _key(tenant.id, call_id)
+        last_layer[key] = layer
+        if tenant.recording.enabled:
+            d = result.decision
+            turn_logs.setdefault(key, []).append(
+                {
+                    "at": _iso(),
+                    "caller": mask_numbers(result.transcript),
+                    "reply": mask_numbers(d.reply),
+                    "layer": layer,
+                    "reason": d.reason,
+                    "sources": d.sources,
+                    "latency_ms": {k: round(v, 1) for k, v in result.latency_ms.items()},
+                }
+            )
         metrics[f'callcenter_turns_total{{tenant="{tenant.id}",layer="{layer}"}}'] += 1
 
     def _schedule_handoff(
@@ -184,6 +241,17 @@ def create_app(
             "# TYPE callcenter_pending_handoffs gauge",
             f"callcenter_pending_handoffs {len(handoffs)}",
         ]
+        lines += ["# TYPE callcenter_records_pending gauge"]
+        lines += [
+            f'callcenter_records_pending{{tenant="{t}"}} {outbox.pending(t)}'
+            for t in outbox.tenants()
+        ]
+        for name, counts in (("delivered", outbox.delivered), ("dropped", outbox.dropped)):
+            lines += [f"# TYPE callcenter_records_{name}_total counter"]
+            lines += [
+                f'callcenter_records_{name}_total{{tenant="{t}"}} {n}'
+                for t, n in sorted(counts.items())
+            ]
         return "\n".join(lines) + "\n"
 
     @app.post("/v1/tenants/{tenant_id}/calls", status_code=201)
@@ -192,6 +260,7 @@ def create_app(
         call_id = uuid.uuid4().hex
         tenant.sessions[call_id] = ConversationState()
         last_seen[_key(tenant.id, call_id)] = clock()
+        started_at[_key(tenant.id, call_id)] = _iso()
         return {"call_id": call_id}
 
     @app.delete("/v1/tenants/{tenant_id}/calls/{call_id}", response_model=CallEndOut)
@@ -279,6 +348,33 @@ def create_app(
         if key not in handoffs:
             raise HTTPException(404, "call has not been handed off")
         _drop_handoff(key)
+        return Response(status_code=204)
+
+    # ---------------------------------------------------------------- recorder app
+    def _recorder(tenant_id: str, authorization: str | None) -> Tenant:
+        tenant = registry.get(tenant_id)
+        # Same answer for "no such tenant", "recording off" and "bad token".
+        if tenant is None or not tenant.recording.verify(authorization):
+            raise HTTPException(401, "invalid recorder credentials")
+        return tenant
+
+    @app.get("/v1/tenants/{tenant_id}/records")
+    def pull_records(
+        tenant_id: str,
+        limit: int = Query(20, ge=1, le=100),
+        authorization: str | None = Header(None),
+    ) -> dict:
+        tenant = _recorder(tenant_id, authorization)
+        records = outbox.claim(tenant.id, limit)
+        return {"records": records, "lease_s": outbox.lease_s}
+
+    @app.post("/v1/tenants/{tenant_id}/records/{record_id}/ack", status_code=204)
+    def ack_record(
+        tenant_id: str, record_id: str, authorization: str | None = Header(None)
+    ) -> Response:
+        tenant = _recorder(tenant_id, authorization)
+        if not outbox.ack(tenant.id, record_id):
+            raise HTTPException(404, "unknown or already acknowledged record")
         return Response(status_code=204)
 
     return app
