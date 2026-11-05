@@ -48,6 +48,13 @@ class Settings:
     # Call records waiting for the customer's recorder app to collect them.
     record_ttl_s: float = field(default_factory=lambda: float(_env("RECORD_TTL_S", "86400")))
     record_lease_s: float = field(default_factory=lambda: float(_env("RECORD_LEASE_S", "60")))
+    # Deployment self-description and recorder bundles.
+    public_url: str = field(default_factory=lambda: _env("PUBLIC_URL", ""))
+    public_ca_file: str = field(default_factory=lambda: _env("PUBLIC_CA_FILE", ""))
+    state_dir: str = field(default_factory=lambda: _env("STATE_DIR", "state"))
+    bind: str = field(default_factory=lambda: _env("API_BIND", "0.0.0.0:8000"))
+    admin_token_sha256: str = field(default_factory=lambda: _env("ADMIN_TOKEN_SHA256", ""))
+    recorder_src: str = field(default_factory=lambda: _env("RECORDER_SRC_DIR", "recorder"))
     # Guard rail: refuse to start if an endpoint points outside the private network.
     allow_external_endpoints: bool = field(
         default_factory=lambda: _env("ALLOW_EXTERNAL_ENDPOINTS", "false").lower() == "true"

@@ -10,10 +10,13 @@ COPY src ./src
 RUN pip install ".[speech,embeddings]"
 
 COPY data ./data
+# Shipped inside customer bundles by POST /v1/admin/tenants/{t}/recorder-bundle
+COPY recorder ./recorder
 
-# Run as non-root
-RUN useradd --create-home --uid 10001 app
+# Run as non-root; STATE_DIR (deployment record, issued tokens) must be writable
+RUN useradd --create-home --uid 10001 app && mkdir -p /app/state && chown app:app /app/state
 USER app
+VOLUME ["/app/state"]
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=3s CMD python -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/healthz')" || exit 1

@@ -10,10 +10,15 @@ receives credentials for the customer's storage.
     RECORDER_TOKEN     token issued with `python -m callcenter.records`
     RECORDER_STORAGE   dir:///data/call-records   or   s3://bucket/prefix
     RECORDER_INTERVAL  seconds between polls (default 10)
+    RECORDER_CA_FILE   CA certificate for a private CA (optional)
     S3 only:           AWS_* variables / RECORDER_S3_ENDPOINT for MinIO etc.
 
     python recorder.py            # poll forever
     python recorder.py --once     # one pull, e.g. from cron
+    python recorder.py --check    # verify DNS, port, TLS and token; stores nothing
+
+The settings above come preconfigured in the bundle downloaded from the call
+center (recorder.env / CONNECTION.md), so the recorder never has to search for it.
 """
 
 from __future__ import annotations
@@ -22,6 +27,8 @@ import argparse
 import json
 import logging
 import os
+import socket
+import ssl
 import tempfile
 import time
 from dataclasses import dataclass
@@ -138,10 +145,41 @@ class Recorder:
         return done
 
 
+def check(client: httpx.Client, tenant: str) -> bool:
+    """Step-by-step connectivity check, printed for the person installing it."""
+    url = urlsplit(str(client.base_url))
+    host, port = url.hostname or "", url.port or (443 if url.scheme == "https" else 80)
+    steps: list[tuple[str, bool, str]] = []
+    try:
+        ips = sorted({i[4][0] for i in socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)})
+        steps.append(("DNS", True, f"{host} -> {', '.join(ips)}"))
+    except OSError as e:
+        steps.append(("DNS", False, f"{host}: {e}"))
+    if steps[-1][1]:
+        try:
+            with socket.create_connection((host, port), timeout=5):
+                steps.append(("TCP", True, f"{host}:{port} reachable"))
+        except OSError as e:
+            steps.append(("TCP", False, f"{host}:{port}: {e} (firewall / route?)"))
+    if steps[-1][1]:
+        try:
+            r = client.get(f"/v1/tenants/{tenant}/recorder/ping")
+            if r.status_code == 200:
+                steps.append(("TLS+AUTH", True, f"server {r.json().get('server_version')}"))
+            else:
+                steps.append(("TLS+AUTH", False, f"HTTP {r.status_code} (token or tenant?)"))
+        except (httpx.HTTPError, ssl.SSLError) as e:
+            steps.append(("TLS+AUTH", False, str(e)))
+    for name, ok, detail in steps:
+        print(f"[{'OK' if ok else 'NG'}] {name:9} {detail}")
+    return all(ok for _, ok, _ in steps) and len(steps) == 3
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--once", action="store_true", help="pull a single batch and exit")
+    ap.add_argument("--check", action="store_true", help="test connectivity and exit")
     args = ap.parse_args()
 
     env = os.environ
@@ -149,7 +187,10 @@ def main() -> None:
         base_url=env["RECORDER_API_URL"],
         headers={"Authorization": f"Bearer {env['RECORDER_TOKEN']}"},
         timeout=30,
+        verify=env.get("RECORDER_CA_FILE") or True,
     )
+    if args.check:
+        raise SystemExit(0 if check(client, env["RECORDER_TENANT"]) else 1)
     rec = Recorder(client, env["RECORDER_TENANT"], storage_from_url(env["RECORDER_STORAGE"]))
     interval = float(env.get("RECORDER_INTERVAL", "10"))
     while True:

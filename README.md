@@ -145,24 +145,59 @@ sequenceDiagram
     Note over API: メモリから削除
 ```
 
-1. トークンを発行し、ハッシュだけをテナント設定に書く
+#### 録音アプリはどうやって本機を見つけるか
 
-   ```bash
-   python -m callcenter.records
-   # data/faq/<tenant>/tenant.json
-   # {"name": "...", "recording": {"enabled": true, "token_sha256": "..."}}
-   ```
+録音アプリは本機を自動で探しません。本機が起動時に**自分の接続情報を記録**し、それを埋め込んだ録音アプリ一式を管理者がダウンロードしてお客様に渡します。
 
-2. お客様の環境で録音アプリを動かす（外向きのHTTPSだけで動き、ポートは開けない）
+```bash
+# 本機の設定（.env）
+PUBLIC_URL=https://callcenter.example.com     # 録音アプリの接続先
+ADMIN_TOKEN_SHA256=<管理者トークンのsha256>    # 未設定なら管理APIは無効
+STATE_DIR=state                               # 記録と発行済みトークンの保存先
 
-   ```bash
-   docker build -t cc-recorder recorder/
-   docker run -d -v /srv/call-records:/data \
-     -e RECORDER_API_URL=https://callcenter.example.com \
-     -e RECORDER_TENANT=demo-clinic -e RECORDER_TOKEN=<発行したトークン> \
-     cc-recorder
-   # S3互換ストレージなら RECORDER_STORAGE=s3://bucket/prefix（MinIO等は RECORDER_S3_ENDPOINT）
-   ```
+# 起動時に state/deployment.json へ記録される（管理者のみ参照可）
+curl -s -H "Authorization: Bearer $ADMIN" localhost:8000/v1/admin/deployment | jq
+
+# お客様用の一式を発行（新しいトークンを発行し、古いトークンは無効になる）
+curl -s -X POST -H "Authorization: Bearer $ADMIN" \
+  localhost:8000/v1/admin/tenants/demo-clinic/recorder-bundle -o recorder-demo-clinic.zip
+```
+
+| 記録する情報 | 本機の記録（管理者のみ） | お客様に渡す一式 |
+|---|---|---|
+| 公開URL・DNS名・ポート | ✅ | ✅ |
+| 名前解決したIP（ファイアウォールの許可用） | ✅ | ✅ |
+| プライベートCAの証明書（`PUBLIC_CA_FILE`） | ✅ | ✅ |
+| 録音アプリ用トークン | ハッシュのみ | ✅（この一式にだけ含まれる） |
+| 作業ディレクトリ・待ち受けアドレス・実行ユーザー/UID・書き込み権限 | ✅ | ❌ 渡さない |
+
+内部構成はお客様側に渡すと攻撃の手がかりになるため、一式には接続に必要な情報だけを入れています。
+
+一式の中身（`recorder/`）：
+
+```
+recorder.py          録音アプリ本体
+Dockerfile           コンテナ用
+docker-compose.yml   そのまま起動できる構成（保存先 /srv/call-records）
+recorder.env         接続先URL・テナント・トークン（設定済み）
+connection.json      接続先・ポート・IPを機械可読で
+CONNECTION.md        許可する通信・必要な権限の説明
+ca.pem               プライベートCAの場合のみ
+```
+
+お客様の環境では、展開して接続確認をしてから起動します。
+
+```bash
+unzip recorder-demo-clinic.zip && cd recorder
+sudo mkdir -p /srv/call-records && sudo chown 10001:10001 /srv/call-records
+docker compose run --rm recorder --check   # DNS → TCP → TLS+認証を順に確認、記録は取らない
+# [OK] DNS       callcenter.example.com -> 203.0.113.10
+# [OK] TCP       callcenter.example.com:443 reachable
+# [OK] TLS+AUTH  server 0.1.0
+docker compose up -d
+```
+
+S3互換ストレージに保存する場合は `recorder.env` の `RECORDER_STORAGE=s3://bucket/prefix` に変えます（MinIO等は `RECORDER_S3_ENDPOINT` も設定）。
 
 - **確実に届ける**：ACKが来ない記録は60秒後（`RECORD_LEASE_S`）に再送。録音アプリは記録IDで重複を防ぐ
 - **抱え込まない**：取りに来ないまま24時間（`RECORD_TTL_S`）過ぎた記録や、1テナント1,000件を超えた古い記録は破棄し、`callcenter_records_dropped_total` で検知できる
@@ -185,7 +220,7 @@ GPUやモデルなしで、通話フロー全体を数百ミリ秒で検証で�
 
 ```bash
 pip install -e ".[dev]"
-pytest -q        # 60 tests
+pytest -q        # 71 tests
 ruff check .
 ```
 
@@ -196,6 +231,7 @@ ruff check .
 | `test_handoff.py` | 引き継ぎ要約の内容、LLM失敗時の代替要約、番号の伏せ字、テナント間で要約が見えないこと |
 | `test_lifecycle.py` | 通話終了で会話が消えること、要約は確認まで残ること、放置通話と要約の期限切れ、他テナントから操作できないこと |
 | `test_records.py` | 記録の作成・取得・ACKでの削除、再送、期限切れと上限、トークン認証、録音アプリの保存と重複防止、保存失敗時にACKしないこと |
+| `test_bundle.py` | 起動時の記録、一式の中身、内部情報を含まないこと、再発行で古いトークンが無効になること、管理APIの認証、接続確認（`--check`） |
 | `test_rag.py` | e5プレフィックス付与、類似度順の検索 |
 | `test_cost_model_and_config.py` | Erlang Cの既知値、AI解決率とコストの関係、外部エンドポイント検出 |
 
@@ -219,6 +255,7 @@ src/callcenter/
   escalation.py   3層エスカレーション判定
   handoff.py      オペレーター向け引き継ぎ要約
   records.py      お客様側へ渡す通話記録の一時保管とトークン
+  deployment.py   起動時の自己記録と録音アプリ一式の生成
   pipeline.py     音声1ターンの処理とレイテンシ計測
   tenants.py      テナント管理
   api.py          FastAPI エンドポイント

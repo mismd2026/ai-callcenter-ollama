@@ -7,3 +7,6 @@ __pycache__/
 .ruff_cache/
 *.wav
 !tests/fixtures/*.wav
+
+# deployment record and issued recorder token hashes (STATE_DIR)
+state/
