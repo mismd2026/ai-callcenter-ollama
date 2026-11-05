@@ -204,6 +204,22 @@ S3互換ストレージに保存する場合は `recorder.env` の `RECORDER_STO
 - 記録の中身：通話の開始・終了時刻、各ターンの発話と応答、層、理由、参照FAQ、処理時間、引き継ぎ要約。8桁以上の数字は伏せ字
 - 録音を有効にしていないテナントでは、記録自体を作らない
 
+### 実機での通し確認（スモークテスト）
+
+1台のPC（CPUのみで可）で一式を起動し、通話1本で全機能を順に確認します。
+
+```bash
+scripts/smoke.sh                                  # 既定は軽い qwen2.5:3b-instruct
+SMOKE_MODEL=qwen2.5:7b-instruct scripts/smoke.sh  # 本番相当のモデルで
+SMOKE_KEEP=1 scripts/smoke.sh                     # 終了後もコンテナを残す
+```
+
+起動済みのAPIに対して確認だけ流すこともできます：`python scripts/smoke.py --url http://localhost:8000 [--admin-token TOKEN]`
+
+確認する流れ：L1 → 続きの質問 → 言い換え（L2）→ 強制ルールで有人化 → 引き継ぎ要約と番号の伏せ字 → 音声の往復（VOICEVOXで作った音声をWhisperで聞き取る）→ 通話終了と破棄 → メトリクス → 録音アプリ一式の発行 → `--check` → 記録の保存とACK後の削除
+
+結果は `PASS` / `WARN` / `FAIL` で表示します。`WARN` はモデルの賢さに左右される項目（小さいモデルで続きの質問を解釈できない等）で、仕組みの不具合ではありません。`FAIL` が1つでもあれば終了コード1になります。
+
 ### Kubernetes へのデプロイ
 
 ```bash
