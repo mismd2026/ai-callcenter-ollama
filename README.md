@@ -214,6 +214,8 @@ SMOKE_MODEL=qwen2.5:7b-instruct scripts/smoke.sh  # 本番相当のモデルで
 SMOKE_KEEP=1 scripts/smoke.sh                     # 終了後もコンテナを残す
 ```
 
+コンテナからモデルの取得先に接続できない環境（プロキシやセキュリティソフトでTLS検証に失敗する等）では、ホストのOllamaから該当モデルだけをコンテナにコピーして続行します。先にホストで `ollama pull qwen2.5:3b-instruct` を実行しておいてください。確認はAPIコンテナの中で実行するので、ホストにPythonのパッケージを入れる必要はありません。
+
 起動済みのAPIに対して確認だけ流すこともできます：`python scripts/smoke.py --url http://localhost:8000 [--admin-token TOKEN]`
 
 確認する流れ：L1 → 続きの質問 → 言い換え（L2）→ 強制ルールで有人化 → 引き継ぎ要約と番号の伏せ字 → 音声の往復（VOICEVOXで作った音声をWhisperで聞き取る）→ 通話終了と破棄 → メトリクス → 録音アプリ一式の発行 → `--check` → 記録の保存とACK後の削除
