@@ -16,6 +16,7 @@
 | 🧭 3層エスカレーション | ① FAQ原文読み上げ → ② FAQ根拠付きLLM回答 → ③ 有人対応。「人と話したい」「解約」等は即座に有人へ | `escalation.py` |
 | 💬 続きの質問 | 直前の発話と合わせてFAQを検索し、直近の会話をLLMに渡すので「それは無料ですか」にも答えられる。前の話題のFAQを原文で読み上げることはしない | `escalation.py` |
 | 📝 引き継ぎ要約 | 有人へ回すとき、用件の要約・エスカレーション理由・会話記録をオペレーター向けにまとめる。応答を返した後に生成するので発信者を待たせず、LLM失敗時も定型の要約で引き継ぐ。長い数字（カード番号等）は自動で伏せる | `handoff.py` / `GET .../handoff` |
+| 🧹 会話データを残さない | 会話は通話中のメモリ上だけに置き、通話終了で破棄。放置された通話（既定10分）と未確認の引き継ぎ要約（既定30分）も自動で消える | `api.py` |
 | 📚 RAG FAQ | multilingual-e5（`query:` / `passage:` プレフィックス対応）でテナントごとに独立した索引 | `rag.py` |
 | 🏢 マルチテナント | テナント単位の索引・セッション分離＋PostgreSQL RLSで他社データ参照を構造的に防止 | `tenants.py` / `db/schema.sql` |
 | ⏱️ レイテンシ計測 | STT / 判定 / TTS の段階別ミリ秒をターンごとに記録、Prometheus形式で出力 | `pipeline.py` / `/metrics` |
@@ -113,6 +114,19 @@ curl -s localhost:8000/v1/tenants/demo-clinic/calls/$CALL/handoff | jq
 
 要約の生成中は `{"status": "pending"}` が返ります。
 
+### 通話の終了と会話データの破棄
+
+```bash
+# 電話ゲートウェイが切断・転送時に呼ぶ（会話はここで破棄）
+curl -s -X DELETE localhost:8000/v1/tenants/demo-clinic/calls/$CALL | jq
+# {"call_id": "...", "turns": 2, "final_layer": 3, "handoff_pending": true}
+
+# オペレーターが要約を確認したら破棄
+curl -s -X DELETE localhost:8000/v1/tenants/demo-clinic/calls/$CALL/handoff
+```
+
+引き継ぎ要約は通話終了後もオペレーターが確認するまで残ります。どちらも `CALL_IDLE_TIMEOUT_S`（既定600秒）・`HANDOFF_TTL_S`（既定1800秒）を過ぎると自動で破棄され、件数は `/metrics` の `callcenter_active_calls` / `callcenter_pending_handoffs` で確認できます。
+
 ### Kubernetes へのデプロイ
 
 ```bash
@@ -129,7 +143,7 @@ GPUやモデルなしで、通話フロー全体を数百ミリ秒で検証で�
 
 ```bash
 pip install -e ".[dev]"
-pytest -q        # 42 tests
+pytest -q        # 48 tests
 ruff check .
 ```
 
@@ -138,6 +152,7 @@ ruff check .
 | `test_escalation.py` | 各層への振り分け、強制ルールの優先、LLMの回答拒否、繰り返し・ターン上限での有人化、続きの質問・履歴の上限・通話間で履歴が混ざらないこと |
 | `test_api.py` | テキスト/音声ターン、**テナント間でセッション・FAQが漏れないこと**、入力検証、メトリクス |
 | `test_handoff.py` | 引き継ぎ要約の内容、LLM失敗時の代替要約、番号の伏せ字、テナント間で要約が見えないこと |
+| `test_lifecycle.py` | 通話終了で会話が消えること、要約は確認まで残ること、放置通話と要約の期限切れ、他テナントから操作できないこと |
 | `test_rag.py` | e5プレフィックス付与、類似度順の検索 |
 | `test_cost_model_and_config.py` | Erlang Cの既知値、AI解決率とコストの関係、外部エンドポイント検出 |
 
