@@ -40,6 +40,11 @@ class Settings:
     )
     # Past turns given to the LLM / used for follow-up retrieval (0 disables).
     max_history_turns: int = field(default_factory=lambda: int(_env("MAX_HISTORY_TURNS", "3")))
+    # In-memory retention of conversation data (seconds).
+    call_idle_timeout_s: float = field(
+        default_factory=lambda: float(_env("CALL_IDLE_TIMEOUT_S", "600"))
+    )
+    handoff_ttl_s: float = field(default_factory=lambda: float(_env("HANDOFF_TTL_S", "1800")))
     # Guard rail: refuse to start if an endpoint points outside the private network.
     allow_external_endpoints: bool = field(
         default_factory=lambda: _env("ALLOW_EXTERNAL_ENDPOINTS", "false").lower() == "true"

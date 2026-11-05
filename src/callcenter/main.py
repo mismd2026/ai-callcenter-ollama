@@ -41,6 +41,8 @@ def build_app():
         registry,
         stt=WhisperSTT(s.whisper_model, s.whisper_device),
         tts=VoicevoxTTS(s.voicevox_url, s.voicevox_speaker),
+        call_idle_timeout_s=s.call_idle_timeout_s,
+        handoff_ttl_s=s.handoff_ttl_s,
     )
 
 
