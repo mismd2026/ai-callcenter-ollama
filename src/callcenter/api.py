@@ -8,6 +8,9 @@
     DELETE /v1/tenants/{tenant}/calls/{call_id}/handoff  operator acknowledged, discard brief
     GET  /v1/tenants/{tenant}/records                    recorder app pulls finished calls
     POST /v1/tenants/{tenant}/records/{record_id}/ack    recorder stored it -> delete here
+    GET  /v1/tenants/{tenant}/recorder/ping              recorder connectivity/auth check
+    GET  /v1/admin/deployment                            (admin) recorded deployment info
+    POST /v1/admin/tenants/{tenant}/recorder-bundle      (admin) issue token + download zip
 
 Conversation data is personal data and lives in memory only. It is discarded
 when the call ends, when a call is idle longer than `call_idle_timeout_s`, and
@@ -24,11 +27,13 @@ audio per utterance to the /audio endpoint.
 from __future__ import annotations
 
 import base64
+import hmac
 import time
 import uuid
 from collections import Counter
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Response, UploadFile
@@ -36,10 +41,11 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from .adapters import SpeechToText, TextToSpeech
+from .deployment import DeploymentManifest, RecordingStore, issue_bundle
 from .escalation import ConversationState, Layer
 from .handoff import HandoffSummarizer, HandoffSummary, mask_numbers
 from .pipeline import TurnResult, VoicePipeline
-from .records import Outbox
+from .records import Outbox, hash_token
 from .tenants import Tenant, TenantRegistry
 
 
@@ -87,6 +93,10 @@ def create_app(
     clock: Callable[[], float] = time.monotonic,
     outbox: Outbox | None = None,
     wall_clock: Callable[[], float] = time.time,
+    deployment: DeploymentManifest | None = None,
+    recording_store: RecordingStore | None = None,
+    admin_token_sha256: str | None = None,
+    recorder_src: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="AI Call Center", version="0.1.0")
     metrics: Counter[str] = Counter()
@@ -376,5 +386,54 @@ def create_app(
         if not outbox.ack(tenant.id, record_id):
             raise HTTPException(404, "unknown or already acknowledged record")
         return Response(status_code=204)
+
+    @app.get("/v1/tenants/{tenant_id}/recorder/ping")
+    def recorder_ping(tenant_id: str, authorization: str | None = Header(None)) -> dict:
+        """Lets the recorder verify DNS, TLS, routing and its token without
+        claiming any records."""
+        tenant = _recorder(tenant_id, authorization)
+        return {"tenant": tenant.id, "server_version": app.version, "status": "ok"}
+
+    # ---------------------------------------------------------------- admin
+    def _admin(authorization: str | None) -> None:
+        # Admin API is off unless ADMIN_TOKEN_SHA256 is configured.
+        scheme, _, token = (authorization or "").partition(" ")
+        ok = (
+            admin_token_sha256
+            and scheme.lower() == "bearer"
+            and token
+            and hmac.compare_digest(hash_token(token.strip()), admin_token_sha256.lower())
+        )
+        if not ok:
+            raise HTTPException(401, "admin credentials required")
+
+    @app.get("/v1/admin/deployment")
+    def get_deployment(authorization: str | None = Header(None)) -> dict:
+        _admin(authorization)
+        if deployment is None:
+            raise HTTPException(404, "deployment info not recorded")
+        return deployment.to_dict()
+
+    @app.post("/v1/admin/tenants/{tenant_id}/recorder-bundle")
+    def recorder_bundle(tenant_id: str, authorization: str | None = Header(None)) -> Response:
+        """Issue a new recorder token (the old one stops working) and return a
+        zip with the recorder app preconfigured for this deployment."""
+        _admin(authorization)
+        tenant = _tenant(tenant_id)
+        if deployment is None or deployment.public is None:
+            raise HTTPException(409, "PUBLIC_URL is not configured on this deployment")
+        if recording_store is None:
+            raise HTTPException(409, "STATE_DIR is not configured on this deployment")
+        kwargs = {"recorder_src": Path(recorder_src)} if recorder_src else {}
+        bundle, cfg = issue_bundle(deployment.public, tenant.id, recording_store, **kwargs)
+        tenant.recording = cfg
+        return Response(
+            content=bundle,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="recorder-{tenant.id}.zip"',
+                "Cache-Control": "no-store",  # contains a credential
+            },
+        )
 
     return app
