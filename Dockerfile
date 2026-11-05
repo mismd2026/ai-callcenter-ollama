@@ -14,7 +14,11 @@ COPY data ./data
 COPY recorder ./recorder
 
 # Run as non-root; STATE_DIR (deployment record, issued tokens) must be writable
-RUN useradd --create-home --uid 10001 app && mkdir -p /app/state && chown app:app /app/state
+# Mount points must exist and belong to app, or Docker creates the volumes
+# root-owned and the model cache / state dir are not writable.
+RUN useradd --create-home --uid 10001 app \
+    && mkdir -p /app/state /home/app/.cache/huggingface \
+    && chown -R app:app /app/state /home/app/.cache
 USER app
 VOLUME ["/app/state"]
 
