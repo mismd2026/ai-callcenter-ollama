@@ -17,6 +17,7 @@
 | 💬 続きの質問 | 直前の発話と合わせてFAQを検索し、直近の会話をLLMに渡すので「それは無料ですか」にも答えられる。前の話題のFAQを原文で読み上げることはしない | `escalation.py` |
 | 📝 引き継ぎ要約 | 有人へ回すとき、用件の要約・エスカレーション理由・会話記録をオペレーター向けにまとめる。応答を返した後に生成するので発信者を待たせず、LLM失敗時も定型の要約で引き継ぐ。長い数字（カード番号等）は自動で伏せる | `handoff.py` / `GET .../handoff` |
 | 🧹 会話データを残さない | 会話は通話中のメモリ上だけに置き、通話終了で破棄。放置された通話（既定10分）と未確認の引き継ぎ要約（既定30分）も自動で消える | `api.py` |
+| 🗄️ 会話記録はお客様のストレージへ | お客様側に置く録音アプリが取りに来たときだけ通話記録を渡し、保存の確認（ACK）を受けたらメモリから削除。こちらはお客様のストレージの認証情報を一切持たない | `records.py` / `recorder/` |
 | 📚 RAG FAQ | multilingual-e5（`query:` / `passage:` プレフィックス対応）でテナントごとに独立した索引 | `rag.py` |
 | 🏢 マルチテナント | テナント単位の索引・セッション分離＋PostgreSQL RLSで他社データ参照を構造的に防止 | `tenants.py` / `db/schema.sql` |
 | ⏱️ レイテンシ計測 | STT / 判定 / TTS の段階別ミリ秒をターンごとに記録、Prometheus形式で出力 | `pipeline.py` / `/metrics` |
@@ -127,6 +128,47 @@ curl -s -X DELETE localhost:8000/v1/tenants/demo-clinic/calls/$CALL/handoff
 
 引き継ぎ要約は通話終了後もオペレーターが確認するまで残ります。どちらも `CALL_IDLE_TIMEOUT_S`（既定600秒）・`HANDOFF_TTL_S`（既定1800秒）を過ぎると自動で破棄され、件数は `/metrics` の `callcenter_active_calls` / `callcenter_pending_handoffs` で確認できます。
 
+### 会話記録をお客様側のストレージに残す
+
+会話記録は、お客様の環境にインストールする**録音アプリ（`recorder/`）**が取りに来たときだけ渡します。こちらからお客様のストレージへ書き込むことはなく、その認証情報も持ちません。
+
+```mermaid
+sequenceDiagram
+    participant API as コールセンターAPI（メモリ）
+    participant R as 録音アプリ（お客様側）
+    participant S as お客様のストレージ
+    Note over API: 通話終了 → 記録を一時保管
+    R->>API: GET /records（トークン認証）
+    API-->>R: 通話記録（60秒の貸し出し）
+    R->>S: 保存（記録IDごとに1ファイル）
+    R->>API: POST /records/{id}/ack
+    Note over API: メモリから削除
+```
+
+1. トークンを発行し、ハッシュだけをテナント設定に書く
+
+   ```bash
+   python -m callcenter.records
+   # data/faq/<tenant>/tenant.json
+   # {"name": "...", "recording": {"enabled": true, "token_sha256": "..."}}
+   ```
+
+2. お客様の環境で録音アプリを動かす（外向きのHTTPSだけで動き、ポートは開けない）
+
+   ```bash
+   docker build -t cc-recorder recorder/
+   docker run -d -v /srv/call-records:/data \
+     -e RECORDER_API_URL=https://callcenter.example.com \
+     -e RECORDER_TENANT=demo-clinic -e RECORDER_TOKEN=<発行したトークン> \
+     cc-recorder
+   # S3互換ストレージなら RECORDER_STORAGE=s3://bucket/prefix（MinIO等は RECORDER_S3_ENDPOINT）
+   ```
+
+- **確実に届ける**：ACKが来ない記録は60秒後（`RECORD_LEASE_S`）に再送。録音アプリは記録IDで重複を防ぐ
+- **抱え込まない**：取りに来ないまま24時間（`RECORD_TTL_S`）過ぎた記録や、1テナント1,000件を超えた古い記録は破棄し、`callcenter_records_dropped_total` で検知できる
+- 記録の中身：通話の開始・終了時刻、各ターンの発話と応答、層、理由、参照FAQ、処理時間、引き継ぎ要約。8桁以上の数字は伏せ字
+- 録音を有効にしていないテナントでは、記録自体を作らない
+
 ### Kubernetes へのデプロイ
 
 ```bash
@@ -143,7 +185,7 @@ GPUやモデルなしで、通話フロー全体を数百ミリ秒で検証で�
 
 ```bash
 pip install -e ".[dev]"
-pytest -q        # 48 tests
+pytest -q        # 60 tests
 ruff check .
 ```
 
@@ -153,6 +195,7 @@ ruff check .
 | `test_api.py` | テキスト/音声ターン、**テナント間でセッション・FAQが漏れないこと**、入力検証、メトリクス |
 | `test_handoff.py` | 引き継ぎ要約の内容、LLM失敗時の代替要約、番号の伏せ字、テナント間で要約が見えないこと |
 | `test_lifecycle.py` | 通話終了で会話が消えること、要約は確認まで残ること、放置通話と要約の期限切れ、他テナントから操作できないこと |
+| `test_records.py` | 記録の作成・取得・ACKでの削除、再送、期限切れと上限、トークン認証、録音アプリの保存と重複防止、保存失敗時にACKしないこと |
 | `test_rag.py` | e5プレフィックス付与、類似度順の検索 |
 | `test_cost_model_and_config.py` | Erlang Cの既知値、AI解決率とコストの関係、外部エンドポイント検出 |
 
@@ -175,12 +218,14 @@ src/callcenter/
   rag.py          FAQ読み込みとベクトル検索
   escalation.py   3層エスカレーション判定
   handoff.py      オペレーター向け引き継ぎ要約
+  records.py      お客様側へ渡す通話記録の一時保管とトークン
   pipeline.py     音声1ターンの処理とレイテンシ計測
   tenants.py      テナント管理
   api.py          FastAPI エンドポイント
   cost_model.py   Erlang C ベースの体制・コスト試算
   config.py       環境変数とデータ主権ガード
 db/schema.sql     マルチテナントスキーマ（pgvector + RLS）
+recorder/         お客様側に置く録音アプリ（ディレクトリ / S3互換に保存）
 deploy/helm/      Helm チャート（HPA・NetworkPolicy含む）
 data/faq/         テナント別FAQ（サンプル: demo-clinic）
 ```

@@ -45,6 +45,9 @@ class Settings:
         default_factory=lambda: float(_env("CALL_IDLE_TIMEOUT_S", "600"))
     )
     handoff_ttl_s: float = field(default_factory=lambda: float(_env("HANDOFF_TTL_S", "1800")))
+    # Call records waiting for the customer's recorder app to collect them.
+    record_ttl_s: float = field(default_factory=lambda: float(_env("RECORD_TTL_S", "86400")))
+    record_lease_s: float = field(default_factory=lambda: float(_env("RECORD_LEASE_S", "60")))
     # Guard rail: refuse to start if an endpoint points outside the private network.
     allow_external_endpoints: bool = field(
         default_factory=lambda: _env("ALLOW_EXTERNAL_ENDPOINTS", "false").lower() == "true"
