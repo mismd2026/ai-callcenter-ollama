@@ -49,6 +49,28 @@ def turn(c: httpx.Client, base: str, cid: str, text: str, audio: bool = False) -
 
 
 def main() -> int:
+    try:
+        return run()
+    except httpx.TransportError as e:
+        report("FAIL", "API connection lost", f"{type(e).__name__}: {e} (API process crashed?)")
+        print_summary([])
+        return 1
+
+
+def print_summary(latencies: list[dict]) -> int:
+    stages: dict[str, list[float]] = {}
+    for lat in latencies:
+        for k, v in lat.items():
+            stages.setdefault(k, []).append(v)
+    if stages:
+        avg = ", ".join(f"{k} {sum(v) / len(v):.0f}ms" for k, v in stages.items())
+        print(f"\nlatency (text turns, avg): {avg}")
+    counts = {s: sum(1 for r in results if r[0] == s) for s in ("PASS", "WARN", "FAIL", "SKIP")}
+    print("summary: " + "  ".join(f"{k} {v}" for k, v in counts.items()))
+    return 1 if counts["FAIL"] else 0
+
+
+def run() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://localhost:8000")
     ap.add_argument("--tenant", default="demo-clinic")
@@ -135,14 +157,21 @@ def main() -> int:
     else:
         report("PASS", "TTS produced WAV (VOICEVOX)", f"{len(wav) // 1024} KiB")
         r = c.post(f"{base}/calls/{vid}/audio", files={"file": ("q.wav", wav, "audio/wav")})
-        transcript = unquote(r.headers.get("X-Transcript", ""))
-        heard = "診療" in transcript or "時間" in transcript
-        report(
-            "PASS" if r.status_code == 200 and heard else "WARN",
-            "STT transcribed synthesized speech (Whisper)",
-            f"{transcript[:40]!r} layer={r.headers.get('X-Escalation-Layer')} "
-            f"total={r.headers.get('X-Latency-Ms')}ms",
-        )
+        if r.status_code != 200:
+            report(
+                "FAIL",
+                "STT transcribed synthesized speech (Whisper)",
+                f"HTTP {r.status_code}: {r.text[:200]}",
+            )
+        else:
+            transcript = unquote(r.headers.get("X-Transcript", ""))
+            heard = "診療" in transcript or "時間" in transcript
+            report(
+                "PASS" if heard else "WARN",
+                "STT transcribed synthesized speech (Whisper)",
+                f"{transcript[:40]!r} layer={r.headers.get('X-Escalation-Layer')} "
+                f"total={r.headers.get('X-Latency-Ms')}ms",
+            )
     c.delete(f"{base}/calls/{vid}")
 
     # 6. call end (#3) --------------------------------------------------------------
@@ -168,17 +197,7 @@ def main() -> int:
     else:
         run_records(c, base, args)
 
-    # summary -----------------------------------------------------------------------
-    stages: dict[str, list[float]] = {}
-    for lat in latencies:
-        for k, v in lat.items():
-            stages.setdefault(k, []).append(v)
-    if stages:
-        avg = ", ".join(f"{k} {sum(v) / len(v):.0f}ms" for k, v in stages.items())
-        print(f"\nlatency (text turns, avg): {avg}")
-    counts = {s: sum(1 for r in results if r[0] == s) for s in ("PASS", "WARN", "FAIL", "SKIP")}
-    print("summary: " + "  ".join(f"{k} {v}" for k, v in counts.items()))
-    return 1 if counts["FAIL"] else 0
+    return print_summary(latencies)
 
 
 def run_records(c: httpx.Client, base: str, args) -> None:

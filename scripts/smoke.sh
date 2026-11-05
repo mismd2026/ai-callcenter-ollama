@@ -72,5 +72,17 @@ docker compose exec -T api python /app/scripts/smoke.py --url http://localhost:8
 status=$?
 set -e
 
+if [ "$status" != 0 ]; then
+  echo
+  echo "== diagnostics (something failed)"
+  docker compose ps -a
+  echo "-- api log (last 60 lines)"
+  docker compose logs --no-color --tail 60 api
+  echo "-- memory available to Docker"
+  docker info --format '{{.MemTotal}}' | awk '{printf "   %.1f GiB\n", $1/1024/1024/1024}'
+  docker inspect --format '   api OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}} Restarts={{.RestartCount}}' \
+    "$(docker compose ps -a -q api)" 2>/dev/null || true
+fi
+
 if [ -z "${SMOKE_KEEP:-}" ]; then docker compose down; fi
 exit $status
