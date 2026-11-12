@@ -126,6 +126,60 @@ estimate(Workload(peak_calls_per_hour=120, ai_resolution_rate=0.6))
 
 AI解決率を30%→80%に改善した場合のオペレーター削減数とコスト差を、営業・導入提案の段階で数値で示せます。
 
+## データベース
+
+PostgreSQL 16 ＋ pgvector を使います（`docker-compose.yml` の `pgvector/pgvector:pg16`）。スキーマは `db/schema.sql` です。
+
+- FAQ の質問文は multilingual-e5-base で 768 次元のベクトルにして `faq_entries.embedding` に持ち、HNSW インデックス（コサイン距離）で検索します。
+- テナントの分離は、共有テーブル＋`tenant_id` 列＋行レベルセキュリティ（RLS）で行います。アプリは `app_rw` ロールで接続し、リクエストごとに `app.tenant_id` を設定するので、WHERE 句を書き忘れても他テナントの行は読めません。
+- 発信者番号は生の値を持たず、ソルト付きハッシュ（`caller_hash`）だけを保存します。
+
+```mermaid
+erDiagram
+    tenants ||--o{ faq_entries : "FAQを持つ"
+    tenants ||--o{ calls : "通話を受ける"
+    calls ||--o{ call_turns : "発話ごとの記録"
+    tenants ||--o{ call_turns : "RLS用に保持"
+
+    tenants {
+        text id PK "テナントID"
+        text name
+        text plan
+        int max_concurrent "同時AI通話数"
+        real faq_direct_thr "FAQ直接回答のしきい値"
+        real rag_context_thr "RAG参照のしきい値"
+    }
+    faq_entries {
+        text tenant_id PK,FK
+        text id PK
+        text category
+        text question
+        text answer
+        vector embedding "768次元"
+    }
+    calls {
+        uuid id PK
+        text tenant_id FK
+        text caller_hash "ハッシュ化した発信者"
+        timestamptz started_at
+        timestamptz ended_at
+        smallint final_layer "最終的な対応層 1-3"
+        text handoff_reason
+    }
+    call_turns {
+        uuid call_id PK,FK
+        int seq PK
+        text tenant_id FK
+        text transcript "STTの結果"
+        text reply "応答文"
+        smallint layer
+        text_array sources "参照したFAQ"
+        int stt_ms
+        int policy_ms
+        int tts_ms
+    }
+```
+
 ## ディレクトリ構成
 
 ```
